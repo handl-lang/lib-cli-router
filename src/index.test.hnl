@@ -17,21 +17,21 @@ from "typeof" import * as typeof
 -- local helpers (kept tiny; the module under test owns the real ones)
 -- ---------------------------------------------------------------------
 
-alen_l :: (xs) ~> while { xs: xs, n: 0 } {
+alen_l := (xs) ~> while { xs: xs, n: 0 } {
   (xs, n) ~> match xs {
     []: { out: n },
     [_h, ...t]: { state: { xs: t, n: n + 1 } }
   }
 }
 
-lmap_l :: (f, xs) ~> while { xs: xs, out: [] } {
+lmap_l := (f, xs) ~> while { xs: xs, out: [] } {
   (xs, out) ~> match xs {
     []: { out: out },
     [h, ...t]: { state: { xs: t, out: [...out, f(h)] } }
   }
 }
 
-mem_l :: (x, xs) ~> while { xs: xs, found: false } {
+mem_l := (x, xs) ~> while { xs: xs, found: false } {
   (xs, found) ~> match xs {
     []: { out: found },
     [h, ...t]: if h == x {
@@ -42,7 +42,7 @@ mem_l :: (x, xs) ~> while { xs: xs, found: false } {
   }
 }
 
-str_of :: (v) ~> if v == null {
+str_of := (v) ~> if v == null {
   "null"
 } else {
   if typeof.is(v, typeof.str()) { v } else { type.to_string(v) }
@@ -129,25 +129,25 @@ test_spec_leaf_doc_rides := assert doc_es[0].doc == "d" &&
 -- dispatch: literals, params, ordering
 -- ---------------------------------------------------------------------
 
-test_literal := assert cli(["myapp", "status"]) =
+test_literal := assert cli(["myapp", "status"]) ==
   { code: 0, out: "status" }
 
-test_nested_literal := assert cli(["myapp", "hello"]) =
+test_nested_literal := assert cli(["myapp", "hello"]) ==
   { code: 0, out: "hello" }
 
-test_param := assert cli(["myapp", "deploy", "staging"]) =
+test_param := assert cli(["myapp", "deploy", "staging"]) ==
   { code: 0, out: "deploy staging" }
 
-test_param_region := assert cli(["myapp", "deploy", "staging", "eu"]) =
+test_param_region := assert cli(["myapp", "deploy", "staging", "eu"]) ==
   { code: 0, out: "deploy staging@eu" }
 
-test_literal_beats_param := assert cli(["myapp", "deploy", "prod"]) =
+test_literal_beats_param := assert cli(["myapp", "deploy", "prod"]) ==
   { code: 0, out: "prod" }
 
-test_splat := assert cli(["myapp", "files", "a", "b", "c"]) =
+test_splat := assert cli(["myapp", "files", "a", "b", "c"]) ==
   { code: 0, out: "rest=a/b/c" }
 
-test_splat_empty := assert cli(["myapp", "files"]) =
+test_splat_empty := assert cli(["myapp", "files"]) ==
   { code: 0, out: "rest=" }
 
 test_argv0_dropped := assert cli(["prog", "status"]).out == "status"
@@ -176,10 +176,10 @@ catch_app := crt.router({
   "*": (_ctx) ~> "caught"
 })
 
-test_catchall_hit := assert catch_app(["p", "anything", "goes"]) =
+test_catchall_hit := assert catch_app(["p", "anything", "goes"]) ==
   { code: 0, out: "caught" }
 
-test_catchall_literal_wins := assert catch_app(["p", "status"]) =
+test_catchall_literal_wins := assert catch_app(["p", "status"]) ==
   { code: 0, out: "status" }
 
 star_app := crt.router({ "*rest": rest_h })
@@ -238,23 +238,23 @@ test_ctx_state_no_us := assert probe_o.state_dump == { name: "x" }
 -- handler result normalization
 -- ---------------------------------------------------------------------
 
-test_pair_result := assert cli(["p", "pair"]) =
+test_pair_result := assert cli(["p", "pair"]) ==
   { code: 0, out: "paired" }
 
-test_code_passthrough := assert cli(["p", "coded"]) =
+test_code_passthrough := assert cli(["p", "coded"]) ==
   { code: 3, out: "nope" }
 
 test_bare_value := assert cli(["p", "status"]).code == 0
 
 outkey_app := crt.router({ r: (_c) ~> { out: "inner" } })
 
-test_record_out_key := assert outkey_app(["p", "r"]) =
+test_record_out_key := assert outkey_app(["p", "r"]) ==
   { code: 0, out: "inner" }
 
 codekey_app := crt.router({ r: (_c) ~> { code: 7, out: "bad",
   extra: 1 } })
 
-test_code_key_wins := assert codekey_app(["p", "r"]) =
+test_code_key_wins := assert codekey_app(["p", "r"]) ==
   { code: 7, out: "bad" }
 
 -- ---------------------------------------------------------------------

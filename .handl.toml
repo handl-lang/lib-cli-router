@@ -2,6 +2,7 @@
 mri = { path = "../lib-mri/src" }
 route = { path = "../lib-route/src" }
 stdio = { path = "../lib-stdio/src" }
+proc = { path = "../lib-proc/src" }
 
 # own package
 cli-router = { path = "src" }

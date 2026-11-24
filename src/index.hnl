@@ -27,9 +27,8 @@
 ---
 --- Dispatch:
 ---   - `argv` INCLUDES argv[0] (the program name); it is dropped before
----     `mri.parse` sees the tail. There is no own-process argv source
----     in handl yet (`posix.argv()` / host args injection pending), so
----     the caller supplies argv -- see `run` below.
+---     `mri.parse` sees the tail. `run` defaults it to `proc.argv()`
+---     (P-012); callers may still supply argv explicitly (tests).
 ---   - positionals (mri's `"_"` list) are the dispatch tokens; the
 ---     match is STRICT -- leftover positionals beyond the route's
 ---     segments miss (add a `"*rest"` catch-all or `":args"` param
@@ -63,17 +62,13 @@
 --- trailing line, `opts.prog` a program name used in the default
 --- footer hint.
 ---
---- `run(app, argv, opts?) ~[1]~>` is the effectful shell: it calls the
+--- `run(app, argv?, opts?) ~[1]~>` is the effectful shell: it calls the
 --- pure `app(argv)`, prints `out` to stdout when `code == 0` else
 --- stderr (via the `stdio` contract -- a `stdio-c`-style backend must
---- be bound), and returns the exit `code`. ARGV GAP, honestly: there
---- is still no own-process argv primitive (`posix.argv()` or host args
---- injection does not exist), so `run` takes argv explicitly; when
---- `posix.argv()` lands the call site becomes `run(app, posix.argv())`.
---- `opts.exit`, when an arrow `(code) ~> _`, is invoked with the code
---- after printing (the honest stand-in for `posix.exit` until one
---- exists); without it `run` simply returns the code for the caller
---- (host extension / script) to act on.
+--- be bound), and exits via `proc.exit(code)` (P-012). `argv` may be
+--- omitted -- it defaults to `proc.argv()`; pass it explicitly in
+--- tests. `opts.exit`, when an arrow `(code) ~> _`, overrides the real
+--- exit (the test seam — a real `proc.exit` would kill the runner).
 ---
 --- Exports:
 ---   router(routes, opts?)        ~> (argv) ~> { code, out }
@@ -89,33 +84,34 @@ from "typeof" import * as typeof
 from "route" import * as rt
 from "mri" import * as mri
 from "stdio" import * as stdio
+from "proc" import * as proc
 
 -- ---------------------------------------------------------------------
 -- list / record helpers
 -- ---------------------------------------------------------------------
 
-alen :: (xs) ~> while { xs: xs, n: 0 } {
+alen := (xs) ~> while { xs: xs, n: 0 } {
   (xs, n) ~> match xs {
     []: { out: n },
     [_h, ...t]: { state: { xs: t, n: n + 1 } }
   }
 }
 
-lmap :: (f, xs) ~> while { xs: xs, out: [] } {
+lmap := (f, xs) ~> while { xs: xs, out: [] } {
   (xs, out) ~> match xs {
     []: { out: out },
     [h, ...t]: { state: { xs: t, out: [...out, f(h)] } }
   }
 }
 
-cat :: (a, bs) ~> while { xs: bs, out: a } {
+cat := (a, bs) ~> while { xs: bs, out: a } {
   (xs, out) ~> match xs {
     []: { out: out },
     [h, ...t]: { state: { xs: t, out: [...out, h] } }
   }
 }
 
-mem :: (x, xs) ~> while { xs: xs, found: false } {
+mem := (x, xs) ~> while { xs: xs, found: false } {
   (xs, found) ~> match xs {
     []: { out: found },
     [h, ...t]: if h == x {
@@ -126,33 +122,33 @@ mem :: (x, xs) ~> while { xs: xs, found: false } {
   }
 }
 
-dropn :: (xs, n) ~> while { xs: xs, n: n } {
+dropn := (xs, n) ~> while { xs: xs, n: n } {
   (xs, n) ~> match xs {
     []: { out: [] },
     [_h, ...t]: if n <= 0 { { out: xs } } else { { state: { xs: t, n: n - 1 } } }
   }
 }
 
-is_arr    :: (v) ~> typeof.is(v, typeof.arr())
-is_obj    :: (v) ~> typeof.is(v, typeof.obj())
-is_str    :: (v) ~> typeof.is(v, typeof.str())
-is_arrow  :: (v) ~> type.of(v) == "arrow"
-is_num    :: (v) ~> typeof.is(v, typeof.num())
+is_arr    := (v) ~> typeof.is(v, typeof.arr())
+is_obj    := (v) ~> typeof.is(v, typeof.obj())
+is_str    := (v) ~> typeof.is(v, typeof.str())
+is_arrow  := (v) ~> type.of(v) == "arrow"
+is_num    := (v) ~> typeof.is(v, typeof.num())
 
-str_of :: (v) ~> if is_str(v) { v } else { type.to_string(v) }
+str_of := (v) ~> if is_str(v) { v } else { type.to_string(v) }
 
 --- record-safe access (a missing-key index raises, so go through
 --- `obj.keys`; records iterate keys sorted, which is also what makes
 --- `entries`/`usage` ordering deterministic).
-rget :: (r, k) ~> if is_obj(r) {
+rget := (r, k) ~> if is_obj(r) {
   if mem(k, obj.keys(r)) { r[k] } else { null }
 } else { null }
 
-rhas :: (r, k) ~> if is_obj(r) { mem(k, obj.keys(r)) } else { false }
+rhas := (r, k) ~> if is_obj(r) { mem(k, obj.keys(r)) } else { false }
 
 --- rebuild a record without key `k` (used to strip mri's `"_"`
 --- positionals out of the flags state).
-rwithout :: (r, k) ~> while { xs: obj.entries(r), acc: {} } {
+rwithout := (r, k) ~> while { xs: obj.entries(r), acc: {} } {
   (xs, acc) ~> match xs {
     []: { out: acc },
     [[ek, ev], ...t]: if ek == k {
@@ -169,7 +165,7 @@ rwithout :: (r, k) ~> while { xs: obj.entries(r), acc: {} } {
 
 --- join a nested-map key onto the accumulated pattern prefix. "." and
 --- "" contribute no segment (the index/root route).
-join_seg :: (prefix, key) ~> if key == "." || key == "" {
+join_seg := (prefix, key) ~> if key == "." || key == "" {
   prefix
 } else {
   if prefix == "" { key } else { prefix + "/" + key }
@@ -178,7 +174,7 @@ join_seg :: (prefix, key) ~> if key == "." || key == "" {
 --- one route-map key's entries. `self` is the walker, passed
 --- explicitly because self-recursive `:=` closures are not supported
 --- by the engines (the http-router `walk` convention).
-leaf_ents :: (self, key, v, seg, dname) ~> do {
+leaf_ents := (self, key, v, seg, dname) ~> do {
   if is_arrow(v) {
     [{ path: seg, handler: v, name: dname }]
   } else {
@@ -206,7 +202,7 @@ leaf_ents :: (self, key, v, seg, dname) ~> do {
 --- recursive route-map walker: `m` is a record level, `prefix` the
 --- accumulated pattern. Keys iterate sorted (handl record order), so
 --- the flat list -- and therefore `usage` -- is deterministic.
-walk :: (self, m, prefix) ~> while {
+walk := (self, m, prefix) ~> while {
   xs: hash_map.keys(m), out: [] } {
   (xs, out) ~> match xs {
     []: { out: out },
@@ -234,7 +230,7 @@ export entries := (routes) ~> if is_arr(routes) {
 -- ---------------------------------------------------------------------
 
 --- one entry's help fragment: pattern + doc summary/description.
-entry_line :: (e) ~> do {
+entry_line := (e) ~> do {
   p := str_of(rget(e, "path"))
   d := rget(e, "doc")
   ds := if d == null {
@@ -284,7 +280,7 @@ export usage := (routes, ...rest) ~> do {
 ---   { code: <num>, out: ... } -> verbatim (code passthrough)
 ---   { out: ... }              -> { code: 0, out: r.out }
 ---   anything else             -> { code: 0, out: r }
-norm_result :: (r) ~> if is_obj(r) {
+norm_result := (r) ~> if is_obj(r) {
   do {
     c := rget(r, "code")
     if is_num(c) {
@@ -303,14 +299,14 @@ norm_result :: (r) ~> if is_obj(r) {
 
 --- the miss result: exit code 2 + rendered usage (the conventional
 --- "usage error" status, like clap/mri-style CLIs).
-miss_result :: (routes, opts) ~> do {
+miss_result := (routes, opts) ~> do {
   u := usage(routes, opts)
   { code: 2, out: u }
 }
 
 --- split `argv` (INCLUDING argv[0]) into mri's record, the positional
 --- token list, and the flags-only state record.
-split_argv :: (argv, mri_opts) ~> do {
+split_argv := (argv, mri_opts) ~> do {
   tail := if alen(argv) == 0 { [] } else { dropn(argv, 1) }
   parsed := mri.parse(tail, mri_opts)
   pos := hash_map.get_or(parsed, "_", [])
@@ -319,7 +315,7 @@ split_argv :: (argv, mri_opts) ~> do {
 }
 
 --- build the handler ctx for a hit.
-build_ctx :: (argv, sp, hit) ~> do {
+build_ctx := (argv, sp, hit) ~> do {
   e := rget(hit, "entry")
   { req: { argv: argv,
            positional: sp.positional,
@@ -330,7 +326,7 @@ build_ctx :: (argv, sp, hit) ~> do {
 }
 
 --- run `hit.entry.handler` through the optional middleware onion.
-call_handler :: (opts, ctx, h) ~> do {
+call_handler := (opts, ctx, h) ~> do {
   mw0 := rget(opts, "middleware")
   mws := if mw0 == null { [] } else { mw0 }
   if is_arr(mws) == false {
@@ -351,7 +347,7 @@ call_handler :: (opts, ctx, h) ~> do {
 }
 
 --- dispatch one argv vector through the compiled trie.
-dispatch_argv :: (trie, routes, opts, argv) ~> do {
+dispatch_argv := (trie, routes, opts, argv) ~> do {
   sp := split_argv(argv, rget(opts, "mri"))
   r := rt.dispatch(trie, sp.positional)
   hit := hash_map.get_or(r, "hit", null)
@@ -385,10 +381,13 @@ export router := (routes, ...rest) ~> do {
 
 --- print `out` and return the exit code. `out` is stringified when it
 --- is not already a String; stdout on success, stderr on failure.
---- `opts.exit` (an arrow `(code) ~> _`) runs after printing when
---- present -- the stand-in for a `posix.exit` primitive.
-export run := (app, argv, ...rest) ~[1]~> do {
-  opts := if alen(rest) == 0 { {} } else { rest[0] }
+--- `argv` may be omitted -- it defaults to `proc.argv()` (own-process
+--- argv, P-012). Exits via `proc.exit(code)`; `opts.exit` (an arrow
+--- `(code) ~> _`) overrides it -- the test seam, since a real exit
+--- would kill the test runner.
+export run := (app, ...rest) ~[1]~> do {
+  argv := if alen(rest) > 0 { rest[0] } else { proc.argv() }
+  opts := if alen(rest) > 1 { rest[1] } else { {} }
   r := app(argv)
   code := if is_obj(r) { hash_map.get_or(r, "code", 0) } else { 0 }
   ov := if is_obj(r) { hash_map.get_or(r, "out", null) } else { r }
@@ -399,7 +398,11 @@ export run := (app, argv, ...rest) ~[1]~> do {
     stdio.eprint(s)
   }
   ex := rget(opts, "exit")
-  if is_arrow(ex) { ex(code) }
+  if is_arrow(ex) {
+    ex(code)
+  } else {
+    proc.exit(code)
+  }
   code
 }
 

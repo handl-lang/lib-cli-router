@@ -1,0 +1,362 @@
+--- cli-router.test -- coverage for the CLI ergonomics layer
+--- (`src/index.hnl`): route-map flattening (nested keys, "." index,
+--- spec leaves, splats), argv splitting via mri (positionals vs
+--- flags), :param/*splat binding + specificity ordering, miss ->
+--- { code: 2, usage }, catch-all "*", handler result normalization
+--- ({code,out} / {out,state} / bare), middleware onion, usage()
+--- rendering, and the flag/has_flag ctx helpers.
+---
+--- `run/3` is effectful (stdio print + optional exit hook) and is NOT
+--- covered here -- it is a thin shell over `router`'s pure core.
+
+from "./index" import * as crt
+from "str" import * as str
+from "typeof" import * as typeof
+
+-- ---------------------------------------------------------------------
+-- local helpers (kept tiny; the module under test owns the real ones)
+-- ---------------------------------------------------------------------
+
+alen_l :: (xs) ~> while { xs: xs, n: 0 } {
+  (xs, n) ~> match xs {
+    []: { out: n },
+    [_h, ...t]: { state: { xs: t, n: n + 1 } }
+  }
+}
+
+lmap_l :: (f, xs) ~> while { xs: xs, out: [] } {
+  (xs, out) ~> match xs {
+    []: { out: out },
+    [h, ...t]: { state: { xs: t, out: [...out, f(h)] } }
+  }
+}
+
+mem_l :: (x, xs) ~> while { xs: xs, found: false } {
+  (xs, found) ~> match xs {
+    []: { out: found },
+    [h, ...t]: if h == x {
+      { out: true }
+    } else {
+      { state: { xs: t, found: found } }
+    }
+  }
+}
+
+str_of :: (v) ~> if v == null {
+  "null"
+} else {
+  if typeof.is(v, typeof.str()) { v } else { type.to_string(v) }
+}
+
+-- ---------------------------------------------------------------------
+-- fixtures
+-- ---------------------------------------------------------------------
+
+hello_h := (ctx) ~> "hello"
+
+status_h := (ctx) ~> "status"
+
+deploy_h := (ctx) ~> "deploy " + ctx.params.env
+
+deploy_region_h := (ctx) ~> "deploy " + ctx.params.env + "@" +
+  ctx.params.region
+
+prod_h := (_ctx) ~> "prod"
+
+rest_h := (ctx) ~> "rest=" + ctx.params.rest
+
+pair_h := (_ctx) ~> { out: "paired", state: { touched: true } }
+
+coded_h := (_ctx) ~> { code: 3, out: "nope" }
+
+flag_h := (ctx) ~> "v=" + str_of(ctx.state.verbose) +
+  " name=" + str_of(ctx.state.name)
+
+routes := {
+  deploy: {
+    ":env": deploy_h,
+    ":env/:region": deploy_region_h,
+    prod: prod_h
+  },
+  status: status_h,
+  hello: hello_h,
+  files: {
+    "*rest": rest_h
+  },
+  pair: { handler: pair_h, doc: "paired handler" },
+  coded: coded_h,
+  flag: flag_h
+}
+
+cli := crt.router(routes)
+
+-- ---------------------------------------------------------------------
+-- entries / flattening
+-- ---------------------------------------------------------------------
+
+flat := crt.entries(routes)
+flat_paths := lmap_l((e) ~> e.path, flat)
+
+test_entries_count := assert alen_l(flat) == 9
+
+test_entries_paths := assert mem_l("deploy/:env", flat_paths) &&
+  mem_l("deploy/:env/:region", flat_paths) &&
+  mem_l("deploy/prod", flat_paths) && mem_l("status", flat_paths) &&
+  mem_l("files/*rest", flat_paths) && mem_l("pair", flat_paths)
+
+pass_es := crt.entries([{ path: "/x", handler: hello_h }])
+
+test_entries_passthrough := assert alen_l(pass_es) == 1 &&
+  pass_es[0].path == "/x"
+
+idx_es := crt.entries({ ".": hello_h })
+
+test_index_route := assert alen_l(idx_es) == 1 &&
+  idx_es[0].path == "" && idx_es[0].name == "index"
+
+ov_es := crt.entries({ go: { handler: hello_h, path: "go-fast" } })
+
+test_spec_leaf_path_override := assert ov_es[0].path == "go-fast" &&
+  ov_es[0].name == "go"
+
+doc_es := crt.entries({ pair: { handler: pair_h, doc: "d",
+  extra: 42 } })
+
+test_spec_leaf_doc_rides := assert doc_es[0].doc == "d" &&
+  doc_es[0].extra == 42
+
+-- ---------------------------------------------------------------------
+-- dispatch: literals, params, ordering
+-- ---------------------------------------------------------------------
+
+test_literal := assert cli(["myapp", "status"]) =
+  { code: 0, out: "status" }
+
+test_nested_literal := assert cli(["myapp", "hello"]) =
+  { code: 0, out: "hello" }
+
+test_param := assert cli(["myapp", "deploy", "staging"]) =
+  { code: 0, out: "deploy staging" }
+
+test_param_region := assert cli(["myapp", "deploy", "staging", "eu"]) =
+  { code: 0, out: "deploy staging@eu" }
+
+test_literal_beats_param := assert cli(["myapp", "deploy", "prod"]) =
+  { code: 0, out: "prod" }
+
+test_splat := assert cli(["myapp", "files", "a", "b", "c"]) =
+  { code: 0, out: "rest=a/b/c" }
+
+test_splat_empty := assert cli(["myapp", "files"]) =
+  { code: 0, out: "rest=" }
+
+test_argv0_dropped := assert cli(["prog", "status"]).out == "status"
+
+-- ---------------------------------------------------------------------
+-- miss -> { code: 2, usage }
+-- ---------------------------------------------------------------------
+
+miss_r := cli(["myapp", "nope"])
+miss_u := miss_r.out
+
+test_miss_code := assert miss_r.code == 2
+
+test_miss_usage := assert str.contains(miss_u, "deploy/:env") &&
+  str.contains(miss_u, "status") &&
+  str.contains(miss_u, "  deploy/prod  -- ") == false
+
+test_miss_empty_argv := assert cli([]).code == 2
+
+-- ---------------------------------------------------------------------
+-- catch-all "*"
+-- ---------------------------------------------------------------------
+
+catch_app := crt.router({
+  status: status_h,
+  "*": (_ctx) ~> "caught"
+})
+
+test_catchall_hit := assert catch_app(["p", "anything", "goes"]) =
+  { code: 0, out: "caught" }
+
+test_catchall_literal_wins := assert catch_app(["p", "status"]) =
+  { code: 0, out: "status" }
+
+star_app := crt.router({ "*rest": rest_h })
+
+test_catchall_named := assert star_app(["p", "x", "y"]).out ==
+  "rest=x/y"
+
+-- ---------------------------------------------------------------------
+-- flags via mri -> ctx.state / ctx.req
+-- ---------------------------------------------------------------------
+
+test_flags_state := assert cli(["p", "flag", "--verbose",
+  "--name", "bob"]).out == "v=true name=bob"
+
+test_flags_eq := assert cli(["p", "flag", "--name=eve"]).out ==
+  "v=null name=eve"
+
+test_flags_bool_string := assert cli(["p", "flag", "--verbose=false",
+  "--name", "x"]).out == "v=false name=x"
+
+dd_r := cli(["p", "flag", "--", "--verbose"])
+
+test_flags_after_dd := assert dd_r.code == 2
+
+probe_app := crt.router({
+  probe: (ctx) ~> {
+    argv: ctx.req.argv,
+    positional: ctx.req.positional,
+    flags: ctx.req.flags,
+    pname: ctx.params.name,
+    ename: ctx.entry.name,
+    state_dump: ctx.state
+  }
+})
+
+probe_r := probe_app(["prog", "probe", "--name", "x"])
+probe_o := probe_r.out
+
+test_ctx_req_record := assert probe_r.code == 0 &&
+  probe_o.argv == ["prog", "probe", "--name", "x"] &&
+  probe_o.positional == ["probe"] &&
+  probe_o.flags.name == "x" &&
+  probe_o.pname == null && probe_o.ename == "probe"
+
+probe2_o := probe_app(["prog", "probe"]).out
+
+test_ctx_positional_extra := assert probe2_o.positional == ["probe"]
+
+-- strict token match: positionals beyond the route's segments miss
+test_extra_positional_misses := assert cli(
+  ["myapp", "status", "extra"]).code == 2
+
+test_ctx_state_no_us := assert probe_o.state_dump == { name: "x" }
+
+-- ---------------------------------------------------------------------
+-- handler result normalization
+-- ---------------------------------------------------------------------
+
+test_pair_result := assert cli(["p", "pair"]) =
+  { code: 0, out: "paired" }
+
+test_code_passthrough := assert cli(["p", "coded"]) =
+  { code: 3, out: "nope" }
+
+test_bare_value := assert cli(["p", "status"]).code == 0
+
+outkey_app := crt.router({ r: (_c) ~> { out: "inner" } })
+
+test_record_out_key := assert outkey_app(["p", "r"]) =
+  { code: 0, out: "inner" }
+
+codekey_app := crt.router({ r: (_c) ~> { code: 7, out: "bad",
+  extra: 1 } })
+
+test_code_key_wins := assert codekey_app(["p", "r"]) =
+  { code: 7, out: "bad" }
+
+-- ---------------------------------------------------------------------
+-- middleware onion
+-- ---------------------------------------------------------------------
+
+mw_log := (ctx, next) ~> do {
+  r := next(ctx)
+  { out: "[mw]" + str_of(r.out), state: r.state }
+}
+
+mw_app := crt.router(routes, { middleware: [mw_log] })
+
+test_middleware_wraps := assert mw_app(["p", "status"]).out ==
+  "[mw]status"
+
+m1 := (ctx, next) ~> do {
+  r := next(ctx)
+  { out: "1" + str_of(r.out), state: r.state }
+}
+m2 := (ctx, next) ~> do {
+  r := next(ctx)
+  { out: "2" + str_of(r.out), state: r.state }
+}
+mw2_app := crt.router(routes, { middleware: [m1, m2] })
+
+test_middleware_order := assert mw2_app(["p", "status"]).out ==
+  "12status"
+
+mw_ctx := (ctx, next) ~> do {
+  r := next(ctx)
+  { out: "params=" + str_of(ctx.params.env) + ":" +
+      str_of(r.out), state: r.state }
+}
+mw3_app := crt.router(routes, { middleware: [mw_ctx] })
+
+test_middleware_sees_ctx := assert mw3_app(
+  ["p", "deploy", "qa"]).out == "params=qa:deploy qa"
+
+-- ---------------------------------------------------------------------
+-- usage()
+-- ---------------------------------------------------------------------
+
+doc_routes := {
+  deploy: {
+    ":env": { handler: deploy_h,
+      doc: { summary: "deploy to an env" } }
+  },
+  status: { handler: status_h, doc: "show status" }
+}
+
+usage_plain := crt.usage(doc_routes)
+
+test_usage_lines := assert str.contains(usage_plain,
+  "deploy/:env  -- deploy to an env") &&
+  str.contains(usage_plain, "status  -- show status")
+
+usage_full := crt.usage(doc_routes,
+  { about: "mycli -- deploys", prog: "mycli" })
+
+test_usage_header_footer := assert str.contains(usage_full,
+  "mycli -- deploys") &&
+  str.contains(usage_full, "run 'mycli --help' for more")
+
+usage_from_entries := crt.usage(crt.entries(doc_routes))
+
+test_usage_entries_list := assert usage_from_entries == usage_plain
+
+usage_ord := crt.usage({ zebra: status_h, apple: hello_h })
+
+test_usage_ordering := assert str.find(usage_ord, "apple") <
+  str.find(usage_ord, "zebra")
+
+-- ---------------------------------------------------------------------
+-- flag / has_flag helpers
+-- ---------------------------------------------------------------------
+
+flag_probe := crt.router({
+  p: (ctx) ~> {
+    v: crt.flag(ctx, "verbose"),
+    has: crt.has_flag(ctx, "verbose"),
+    missing: crt.flag(ctx, "nope"),
+    has_missing: crt.has_flag(ctx, "nope")
+  }
+})
+
+flag_r := flag_probe(["x", "p", "--verbose"]).out
+
+test_flag_helper := assert flag_r.v == true && flag_r.has == true &&
+  flag_r.missing == null && flag_r.has_missing == false
+
+neg_r := flag_probe(["x", "p", "--no-verbose"]).out
+
+test_has_flag_false_value := assert neg_r.has == true &&
+  neg_r.v == false
+
+-- ---------------------------------------------------------------------
+-- mri opts passthrough
+-- ---------------------------------------------------------------------
+
+bool_app := crt.router({
+  go: (ctx) ~> type.to_string(ctx.state.force)
+}, { mri: { boolean: ["force"] } })
+
+test_mri_opts := assert bool_app(["p", "go", "--force"]).out == "true"

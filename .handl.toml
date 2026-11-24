@@ -1,0 +1,7 @@
+[dependencies]
+mri = { path = "../lib-mri/src" }
+route = { path = "../lib-route/src" }
+stdio = { path = "../lib-stdio/src" }
+
+# own package
+cli-router = { path = "src" }

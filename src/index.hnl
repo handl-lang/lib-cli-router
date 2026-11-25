@@ -385,7 +385,7 @@ export router := (routes, ...rest) ~> do {
 --- argv, P-012). Exits via `proc.exit(code)`; `opts.exit` (an arrow
 --- `(code) ~> _`) overrides it -- the test seam, since a real exit
 --- would kill the test runner.
-export run := (app, ...rest) ~[1]~> do {
+export run := (app, ...rest) ~>[1] do {
   argv := if alen(rest) > 0 { rest[0] } else { proc.argv() }
   opts := if alen(rest) > 1 { rest[1] } else { {} }
   r := app(argv)
